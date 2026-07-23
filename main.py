@@ -56,6 +56,24 @@ async def owntracks_webhook(request: Request):
     data = await request.json()
     logger.info("Received: %s", data)
 
+    # transition イベント（OwnTracks の Region 入退場）を処理
+    if data.get("_type") == "transition":
+        topic = data.get("topic", "")
+        parts = topic.split("/")
+        username = parts[1] if len(parts) >= 2 else data.get("tid", "unknown")
+        event = data.get("event")  # "enter" or "leave"
+        desc = data.get("desc", "不明な場所")
+        time_str = datetime.now().strftime("%H:%M")
+        if event == "enter":
+            msg = f"📍 {username} が「{desc}」に到着しました ({time_str})"
+            logger.info(msg)
+            await send_telegram(msg)
+        elif event == "leave":
+            msg = f"🚶 {username} が「{desc}」を出発しました ({time_str})"
+            logger.info(msg)
+            await send_telegram(msg)
+        return JSONResponse(content=[])
+
     # OwnTracksのlocationイベントのみ処理
     if data.get("_type") != "location":
         return JSONResponse(content=[])

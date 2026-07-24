@@ -1,11 +1,12 @@
 import os
 import io
-import math
 import json
 import base64
+import sqlite3
 import httpx
 import qrcode
 import logging
+from contextlib import asynccontextmanager
 from datetime import datetime
 from fastapi import FastAPI, Request
 from fastapi.responses import JSONResponse, HTMLResponse, Response
@@ -16,13 +17,53 @@ load_dotenv()
 logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(message)s")
 logger = logging.getLogger(__name__)
 
-app = FastAPI(title="Location Notifier")
+DB_PATH = os.getenv("DB_PATH", "state.db")
+
+
+def _db():
+    return sqlite3.connect(DB_PATH)
+
+
+def _init_db():
+    with _db() as con:
+        con.execute(
+            "CREATE TABLE IF NOT EXISTS user_state "
+            "(username TEXT PRIMARY KEY, inside TEXT, lat REAL, lon REAL)"
+        )
+
+
+def _load_states() -> dict[str, dict]:
+    with _db() as con:
+        rows = con.execute("SELECT username, inside, lat, lon FROM user_state").fetchall()
+    return {
+        row[0]: {"inside": json.loads(row[1]), "lat": row[2], "lon": row[3]}
+        for row in rows
+    }
+
+
+def _save_state(username: str, state: dict):
+    with _db() as con:
+        con.execute(
+            "INSERT INTO user_state (username, inside, lat, lon) VALUES (?, ?, ?, ?) "
+            "ON CONFLICT(username) DO UPDATE SET inside=excluded.inside, lat=excluded.lat, lon=excluded.lon",
+            (username, json.dumps(state["inside"]), state.get("lat"), state.get("lon")),
+        )
+
+
+@asynccontextmanager
+async def lifespan(_: FastAPI):
+    _init_db()
+    user_state.update(_load_states())
+    logger.info("Loaded user_state from DB: %s", list(user_state.keys()))
+    yield
+
+
+app = FastAPI(title="Location Notifier", lifespan=lifespan)
 
 TELEGRAM_TOKEN = os.environ["TELEGRAM_TOKEN"]
 TELEGRAM_CHAT_ID = os.environ["TELEGRAM_CHAT_ID"]
 BASE_URL = os.getenv("BASE_URL", "https://manso.ahirukuma.cc")
 
-# 場所の設定（.envまたは環境変数で上書き可能）
 PLACES = [
     {
         "name": os.getenv("PLACE_1_NAME", "会社"),
@@ -32,18 +73,8 @@ PLACES = [
     },
 ]
 
-# ユーザーごとの前回状態（メモリ内。再起動でリセット）
+# ユーザーごとの前回状態（起動時にDBからロード）
 user_state: dict[str, dict] = {}
-
-
-def haversine(lat1: float, lon1: float, lat2: float, lon2: float) -> float:
-    """2点間の距離をメートルで返す"""
-    R = 6371000
-    phi1, phi2 = math.radians(lat1), math.radians(lat2)
-    dphi = math.radians(lat2 - lat1)
-    dlambda = math.radians(lon2 - lon1)
-    a = math.sin(dphi / 2) ** 2 + math.cos(phi1) * math.cos(phi2) * math.sin(dlambda / 2) ** 2
-    return R * 2 * math.atan2(math.sqrt(a), math.sqrt(1 - a))
 
 
 async def send_telegram(message: str):
@@ -67,57 +98,47 @@ async def owntracks_webhook(request: Request):
         event = data.get("event")  # "enter" or "leave"
         desc = data.get("desc", "不明な場所")
         time_str = datetime.now().strftime("%H:%M")
+
+        prev_state = user_state.get(username, {})
+        prev_in = set(prev_state.get("inside", []))
+        lat = data.get("lat") or prev_state.get("lat")
+        lon = data.get("lon") or prev_state.get("lon")
+
         if event == "enter":
             msg = f"📍 {username} が「{desc}」に到着しました ({time_str})"
             logger.info(msg)
             await send_telegram(msg)
+            new_state = {"inside": list(prev_in | {desc}), "lat": lat, "lon": lon}
+            user_state[username] = new_state
+            _save_state(username, new_state)
         elif event == "leave":
             msg = f"🚶 {username} が「{desc}」を出発しました ({time_str})"
             logger.info(msg)
             await send_telegram(msg)
+            new_state = {"inside": list(prev_in - {desc}), "lat": lat, "lon": lon}
+            user_state[username] = new_state
+            _save_state(username, new_state)
         return JSONResponse(content=[])
 
-    # OwnTracksのlocationイベントのみ処理
+    # locationイベントは lat/lon のみ更新（inside は transition イベントで管理）
     if data.get("_type") != "location":
         return JSONResponse(content=[])
 
-    user = data.get("tid", "unknown")  # Tracker ID (OwnTracksアプリで設定する2文字のID)
     lat = data.get("lat")
     lon = data.get("lon")
-    topic = data.get("topic", "")  # 例: owntracks/username/device
+    topic = data.get("topic", "")
 
     if lat is None or lon is None:
         return JSONResponse(content=[])
 
-    # topic からユーザー名を取得
     parts = topic.split("/")
+    user = data.get("tid", "unknown")
     username = parts[1] if len(parts) >= 2 else user
 
-    now_in = set()
-    for place in PLACES:
-        dist = haversine(lat, lon, place["lat"], place["lon"])
-        if dist <= place["radius_m"]:
-            now_in.add(place["name"])
-
     prev_state = user_state.get(username, {})
-    prev_in = set(prev_state.get("inside", []))
-
-    entered = now_in - prev_in
-    left = prev_in - now_in
-
-    time_str = datetime.now().strftime("%H:%M")
-
-    for place in entered:
-        msg = f"📍 {username} が「{place}」に到着しました ({time_str})"
-        logger.info(msg)
-        await send_telegram(msg)
-
-    for place in left:
-        msg = f"🚶 {username} が「{place}」を出発しました ({time_str})"
-        logger.info(msg)
-        await send_telegram(msg)
-
-    user_state[username] = {"inside": list(now_in), "lat": lat, "lon": lon}
+    new_state = {"inside": prev_state.get("inside", []), "lat": lat, "lon": lon}
+    user_state[username] = new_state
+    _save_state(username, new_state)
 
     return JSONResponse(content=[])
 
@@ -192,6 +213,17 @@ async def download_config(name: str):
     if not name or not all(c.isalnum() or c in "-_" for c in name):
         return JSONResponse(status_code=400, content={"error": "名前は半角英数字・ハイフン・アンダースコアのみ使用できます"})
     tid = name[:2].lower()
+    waypoints = [
+        {
+            "_type": "waypoint",
+            "desc": p["name"],
+            "lat": p["lat"],
+            "lon": p["lon"],
+            "rad": int(p["radius_m"]),
+            "tst": 0,
+        }
+        for p in PLACES
+    ]
     config = {
         "_type": "configuration",
         "mode": 3,
@@ -203,6 +235,7 @@ async def download_config(name: str):
         "ranging": False,
         "positions": 1,
         "autostartOnBoot": True,
+        "waypoints": waypoints,
     }
     content = json.dumps(config, ensure_ascii=False)
     return Response(
@@ -254,7 +287,7 @@ async def telegram_webhook(request: Request):
 
 @app.get("/health")
 async def health():
-    return {"status": "ok", "places": [p["name"] for p in PLACES]}
+    return {"status": "ok"}
 
 
 @app.get("/status")
@@ -263,8 +296,7 @@ async def status():
         "users": {
             name: {
                 "inside": state["inside"],
-                "lat": state.get("lat"),
-                "lon": state.get("lon"),
+                **({"lat": state.get("lat"), "lon": state.get("lon")} if state["inside"] else {}),
             }
             for name, state in user_state.items()
         }

@@ -1,6 +1,7 @@
 import os
 import io
 import json
+import math
 import base64
 import sqlite3
 import httpx
@@ -76,6 +77,18 @@ PLACES = [
 # ユーザーごとの前回状態（起動時にDBからロード）
 user_state: dict[str, dict] = {}
 
+# transition イベントの重複通知防止（username -> {key, time}）
+last_transition: dict[str, dict] = {}
+
+
+def haversine(lat1: float, lon1: float, lat2: float, lon2: float) -> float:
+    R = 6371000
+    phi1, phi2 = math.radians(lat1), math.radians(lat2)
+    dphi = math.radians(lat2 - lat1)
+    dlambda = math.radians(lon2 - lon1)
+    a = math.sin(dphi / 2) ** 2 + math.cos(phi1) * math.cos(phi2) * math.sin(dlambda / 2) ** 2
+    return R * 2 * math.atan2(math.sqrt(a), math.sqrt(1 - a))
+
 
 async def send_telegram(message: str):
     url = f"https://api.telegram.org/bot{TELEGRAM_TOKEN}/sendMessage"
@@ -90,37 +103,34 @@ async def owntracks_webhook(request: Request):
     data = await request.json()
     logger.info("Received: %s", data)
 
-    # transition イベント（OwnTracks の Region 入退場）を処理
+    # transition イベントは Telegram 通知のみ（状態管理は location イベントに一本化）
     if data.get("_type") == "transition":
         topic = data.get("topic", "")
         parts = topic.split("/")
         username = parts[1] if len(parts) >= 2 else data.get("tid", "unknown")
-        event = data.get("event")  # "enter" or "leave"
+        event = data.get("event")
         desc = data.get("desc", "不明な場所")
         time_str = datetime.now().strftime("%H:%M")
 
-        prev_state = user_state.get(username, {})
-        prev_in = set(prev_state.get("inside", []))
-        lat = data.get("lat") or prev_state.get("lat")
-        lon = data.get("lon") or prev_state.get("lon")
+        # 60秒以内に同じ通知を送っていればスキップ
+        dedup_key = (username, event, desc)
+        last = last_transition.get(username)
+        now_ts = datetime.now().timestamp()
+        if last and last["key"] == dedup_key and now_ts - last["time"] < 60:
+            logger.info("Skipping duplicate transition: %s", dedup_key)
+            return JSONResponse(content=[])
+        last_transition[username] = {"key": dedup_key, "time": now_ts}
 
         if event == "enter":
             msg = f"📍 {username} が「{desc}」に到着しました ({time_str})"
             logger.info(msg)
             await send_telegram(msg)
-            new_state = {"inside": list(prev_in | {desc}), "lat": lat, "lon": lon}
-            user_state[username] = new_state
-            _save_state(username, new_state)
         elif event == "leave":
             msg = f"🚶 {username} が「{desc}」を出発しました ({time_str})"
             logger.info(msg)
             await send_telegram(msg)
-            new_state = {"inside": list(prev_in - {desc}), "lat": lat, "lon": lon}
-            user_state[username] = new_state
-            _save_state(username, new_state)
         return JSONResponse(content=[])
 
-    # locationイベントは lat/lon のみ更新（inside は transition イベントで管理）
     if data.get("_type") != "location":
         return JSONResponse(content=[])
 
@@ -135,8 +145,10 @@ async def owntracks_webhook(request: Request):
     user = data.get("tid", "unknown")
     username = parts[1] if len(parts) >= 2 else user
 
-    prev_state = user_state.get(username, {})
-    new_state = {"inside": prev_state.get("inside", []), "lat": lat, "lon": lon}
+    # haversine でサーバー側から inside/outside を判定
+    now_in = [p["name"] for p in PLACES if haversine(lat, lon, p["lat"], p["lon"]) <= p["radius_m"]]
+
+    new_state = {"inside": now_in, "lat": lat, "lon": lon}
     user_state[username] = new_state
     _save_state(username, new_state)
 
@@ -296,7 +308,8 @@ async def status():
         "users": {
             name: {
                 "inside": state["inside"],
-                **({"lat": state.get("lat"), "lon": state.get("lon")} if state["inside"] else {}),
+                "lat": state.get("lat"),
+                "lon": state.get("lon"),
             }
             for name, state in user_state.items()
         }

@@ -80,6 +80,9 @@ user_state: dict[str, dict] = {}
 # transition イベントの重複通知防止（username -> {key, time}）
 last_transition: dict[str, dict] = {}
 
+# 全員集合通知済みフラグ（全員insideになったら1回だけ通知）
+all_inside_notified = False
+
 
 def haversine(lat1: float, lon1: float, lat2: float, lon2: float) -> float:
     R = 6371000
@@ -151,6 +154,19 @@ async def owntracks_webhook(request: Request):
     new_state = {"inside": now_in, "lat": lat, "lon": lon}
     user_state[username] = new_state
     _save_state(username, new_state)
+
+    # 全員 inside になったら1回だけ通知
+    global all_inside_notified
+    if user_state and all(state["inside"] for state in user_state.values()):
+        if not all_inside_notified:
+            all_inside_notified = True
+            await send_telegram("おめでとうございます！全員集まりました！🎉")
+            await send_telegram(
+                "記念にmanso君から皆さんにプレゼントです！\n"
+                + os.environ["PRESENT_URL"]
+            )
+    else:
+        all_inside_notified = False
 
     return JSONResponse(content=[])
 

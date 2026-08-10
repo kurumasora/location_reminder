@@ -4,6 +4,7 @@ import json
 import math
 import base64
 import sqlite3
+import asyncio
 import httpx
 import qrcode
 import logging
@@ -74,11 +75,17 @@ PLACES = [
     },
 ]
 
+# 状態変化が何秒継続したら確定通知するか（チャタリング防止のデバウンス）
+DEBOUNCE_SECONDS = int(os.getenv("DEBOUNCE_SECONDS", "180"))
+
 # ユーザーごとの前回状態（起動時にDBからロード）
 user_state: dict[str, dict] = {}
 
-# transition イベントの重複通知防止（username -> {key, time}）
-last_transition: dict[str, dict] = {}
+# (username, desc) -> 確定済みの方向 ("enter"/"leave")。未確定時は "leave"(圏外) 扱い
+confirmed_direction: dict[tuple[str, str], str] = {}
+
+# (username, desc) -> 保留中(未確定)のデバウンスタスク
+pending_transitions: dict[tuple[str, str], asyncio.Task] = {}
 
 # 全員集合通知済みフラグ（全員insideになったら1回だけ通知）
 all_inside_notified = False
@@ -100,6 +107,25 @@ async def send_telegram(message: str):
         resp.raise_for_status()
 
 
+async def confirm_transition(username: str, desc: str, direction: str, key: tuple[str, str]):
+    """DEBOUNCE_SECONDS 待ち、その間に取り消されなければ確定して通知する"""
+    try:
+        await asyncio.sleep(DEBOUNCE_SECONDS)
+    except asyncio.CancelledError:
+        return
+
+    confirmed_direction[key] = direction
+    pending_transitions.pop(key, None)
+
+    time_str = datetime.now().strftime("%H:%M")
+    if direction == "enter":
+        msg = f"📍 {username} が「{desc}」に到着しました ({time_str})"
+    else:
+        msg = f"🚶 {username} が「{desc}」を出発しました ({time_str})"
+    logger.info(msg)
+    await send_telegram(msg)
+
+
 @app.post("/owntracks")
 async def owntracks_webhook(request: Request):
     """OwnTracks HTTP modeのwebhook受信エンドポイント"""
@@ -113,25 +139,25 @@ async def owntracks_webhook(request: Request):
         username = parts[1] if len(parts) >= 2 else data.get("tid", "unknown")
         event = data.get("event")
         desc = data.get("desc", "不明な場所")
-        time_str = datetime.now().strftime("%H:%M")
 
-        # 60秒以内に同じ通知を送っていればスキップ
-        dedup_key = (username, event, desc)
-        last = last_transition.get(username)
-        now_ts = datetime.now().timestamp()
-        if last and last["key"] == dedup_key and now_ts - last["time"] < 60:
-            logger.info("Skipping duplicate transition: %s", dedup_key)
-            return JSONResponse(content=[])
-        last_transition[username] = {"key": dedup_key, "time": now_ts}
+        key = (username, desc)
+        current = confirmed_direction.get(key, "leave")
+        pending = pending_transitions.get(key)
 
-        if event == "enter":
-            msg = f"📍 {username} が「{desc}」に到着しました ({time_str})"
-            logger.info(msg)
-            await send_telegram(msg)
-        elif event == "leave":
-            msg = f"🚶 {username} が「{desc}」を出発しました ({time_str})"
-            logger.info(msg)
-            await send_telegram(msg)
+        if event == current:
+            # 確定済みの状態に戻った＝チャタリングだったので保留中の通知を取り消す
+            if pending is not None:
+                pending.cancel()
+                pending_transitions.pop(key, None)
+                logger.info("Debounce cancelled (reverted): %s", key)
+        elif pending is None:
+            # 新しい状態変化 → デバウンス開始（DEBOUNCE_SECONDS後に確定通知）
+            pending_transitions[key] = asyncio.create_task(
+                confirm_transition(username, desc, event, key)
+            )
+            logger.info("Debounce started: %s -> %s", key, event)
+        # pending が既にある（同方向で確定待ち中）場合は何もせずタイマー継続
+
         return JSONResponse(content=[])
 
     if data.get("_type") != "location":

@@ -182,6 +182,7 @@ async def owntracks_webhook(request: Request):
     _save_state(username, new_state)
 
     # 全員 inside になったら1回だけ通知
+    # なにこれ
     global all_inside_notified
     if user_state and all(state["inside"] for state in user_state.values()):
         if not all_inside_notified:

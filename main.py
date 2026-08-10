@@ -107,7 +107,7 @@ async def send_telegram(message: str):
         resp.raise_for_status()
 
 
-async def confirm_transition(username: str, desc: str, direction: str, key: tuple[str, str]):
+async def confirm_transition(username: str, desc: str, direction: str, key: tuple[str, str], event_time: datetime):
     """DEBOUNCE_SECONDS 待ち、その間に取り消されなければ確定して通知する"""
     try:
         await asyncio.sleep(DEBOUNCE_SECONDS)
@@ -117,7 +117,7 @@ async def confirm_transition(username: str, desc: str, direction: str, key: tupl
     confirmed_direction[key] = direction
     pending_transitions.pop(key, None)
 
-    time_str = datetime.now().strftime("%H:%M")
+    time_str = event_time.strftime("%H:%M")
     if direction == "enter":
         msg = f"📍 {username} が「{desc}」に到着しました ({time_str})"
     else:
@@ -153,7 +153,7 @@ async def owntracks_webhook(request: Request):
         elif pending is None:
             # 新しい状態変化 → デバウンス開始（DEBOUNCE_SECONDS後に確定通知）
             pending_transitions[key] = asyncio.create_task(
-                confirm_transition(username, desc, event, key)
+                confirm_transition(username, desc, event, key, datetime.now())
             )
             logger.info("Debounce started: %s -> %s", key, event)
         # pending が既にある（同方向で確定待ち中）場合は何もせずタイマー継続

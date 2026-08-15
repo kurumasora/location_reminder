@@ -109,22 +109,34 @@ async def send_telegram(message: str):
 
 async def confirm_transition(username: str, desc: str, direction: str, key: tuple[str, str], event_time: datetime):
     """DEBOUNCE_SECONDS 待ち、その間に取り消されなければ確定して通知する"""
+    task = asyncio.current_task()
     try:
         await asyncio.sleep(DEBOUNCE_SECONDS)
     except asyncio.CancelledError:
         return
 
-    confirmed_direction[key] = direction
-    pending_transitions.pop(key, None)
-
     time_str = event_time.strftime("%H:%M")
     if direction == "enter":
         msg = f"📍 {username} が「{desc}」に到着しました ({time_str})"
-    else:
+    elif direction == "leave":
         msg = f"🚶 {username} が「{desc}」を出発しました ({time_str})"
-    logger.info(msg)
-    await send_telegram(msg)
+    else:
+        logger.info("Ignoring unknown transition direction: %s (%s)", direction, key)
+        if task is not None and pending_transitions.get(key) is task:
+            pending_transitions.pop(key, None)
+        return
 
+    try:
+        logger.info(msg)
+        await send_telegram(msg)
+    except Exception:
+        logger.exception("Failed to send transition notification: %s", key)
+        return
+    finally:
+        if task is not None and pending_transitions.get(key) is task:
+            pending_transitions.pop(key, None)
+
+    confirmed_direction[key] = direction
 
 @app.post("/owntracks")
 async def owntracks_webhook(request: Request):

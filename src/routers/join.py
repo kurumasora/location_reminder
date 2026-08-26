@@ -5,8 +5,8 @@ from string import Template
 from fastapi import APIRouter
 from fastapi.responses import HTMLResponse, JSONResponse, Response
 
-from app.config import BASE_URL, PLACES
-from app.qr import make_qr_base64
+from src.config import BASE_URL, PLACES
+from src.qr import make_qr_base64
 
 router = APIRouter()
 

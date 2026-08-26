@@ -3,8 +3,8 @@ from datetime import datetime
 
 from fastapi.responses import JSONResponse
 
-from app.config import DEBOUNCE_SECONDS, logger
-from app.telegram import send_telegram
+from src.config import DEBOUNCE_SECONDS, logger
+from src.telegram import send_telegram
 
 # (username, desc) -> 確定済みの方向 ("enter"/"leave")。未確定時は "leave"(圏外) 扱い
 confirmed_direction: dict[tuple[str, str], str] = {}

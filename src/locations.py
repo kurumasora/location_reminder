@@ -2,10 +2,10 @@ import os
 
 from fastapi.responses import JSONResponse
 
-from app.config import PLACES, logger
-from app.geo import haversine
-from app.db import _save_state
-from app.telegram import send_telegram
+from src.config import PLACES, logger
+from src.geo import haversine
+from src.db import _save_state
+from src.telegram import send_telegram
 
 # ユーザーごとの前回状態（起動時にDBからロード）
 user_state: dict[str, dict] = {}

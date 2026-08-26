@@ -1,6 +1,6 @@
 import httpx
 
-from app.config import TELEGRAM_TOKEN, TELEGRAM_CHAT_ID
+from src.config import TELEGRAM_TOKEN, TELEGRAM_CHAT_ID
 
 
 async def send_telegram(message: str):

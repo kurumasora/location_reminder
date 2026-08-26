@@ -1,9 +1,9 @@
 from fastapi import APIRouter, Request
 from fastapi.responses import JSONResponse
 
-from app.config import logger
-from app.transitions import handle_transition
-from app.locations import handle_location
+from src.config import logger
+from src.transitions import handle_transition
+from src.locations import handle_location
 
 router = APIRouter()
 

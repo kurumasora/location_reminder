@@ -1,7 +1,7 @@
 import json
 import sqlite3
 
-from app.config import DB_PATH
+from src.config import DB_PATH
 
 
 def _db():

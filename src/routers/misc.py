@@ -1,6 +1,6 @@
 from fastapi import APIRouter
 
-from app.locations import user_state
+from src.locations import user_state
 
 router = APIRouter()
 

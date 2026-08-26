@@ -1,8 +1,8 @@
 from fastapi import APIRouter, Request
 from fastapi.responses import JSONResponse
 
-from app.config import BASE_URL, logger
-from app.telegram import send_telegram
+from src.config import BASE_URL, logger
+from src.telegram import send_telegram
 
 router = APIRouter()
 

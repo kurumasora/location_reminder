@@ -2,10 +2,10 @@ from contextlib import asynccontextmanager
 
 from fastapi import FastAPI
 
-from app.config import logger
-from app.db import _init_db, _load_states
-from app import locations
-from app.routers import owntracks, join, telegram_webhook, misc
+from src.config import logger
+from src.db import _init_db, _load_states
+from src import locations
+from src.routers import owntracks, join, telegram_webhook, misc
 
 
 @asynccontextmanager
